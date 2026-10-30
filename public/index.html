@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Presence chat demo</title>
+  <style>
+    :root { --bg: #f7f7f8; --panel: #fff; --text: #1d1d1f; --muted: #6e6e73; --line: #d9d9de; --accent: #2457d6; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #151517; --panel: #1f1f22; --text: #ececf1; --muted: #9a9aa3; --line: #34343a; --accent: #7aa2ff; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 15px/1.45 system-ui, sans-serif; background: var(--bg); color: var(--text); }
+    main { max-width: 900px; margin: 0 auto; padding: 16px; display: grid; gap: 12px; }
+    form, section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+    form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    input { flex: 1 1 160px; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; }
+    button { padding: 8px 14px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: default; }
+    .room { display: grid; grid-template-columns: 1fr 200px; gap: 12px; }
+    @media (max-width: 640px) { .room { grid-template-columns: 1fr; } }
+    #log { height: 360px; overflow-y: auto; margin: 0; padding: 0; list-style: none; }
+    #log li { padding: 4px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+    #log .meta, #typing, #status { color: var(--muted); font-size: 13px; }
+    #members { margin: 0; padding-left: 18px; }
+    h2 { font-size: 14px; margin: 0 0 8px; color: var(--muted); font-weight: 600; }
+  </style>
+</head>
+<body>
+<main>
+  <form id="connect">
+    <input id="name" placeholder="Your name" value="guest" required>
+    <input id="room" placeholder="Room" value="lobby" pattern="[a-z0-9][a-z0-9_-]{0,63}" required>
+    <button id="connectButton">Connect</button>
+    <span id="status">disconnected</span>
+  </form>
+  <div class="room">
+    <section>
+      <h2>Messages</h2>
+      <ul id="log"></ul>
+      <div id="typing">&nbsp;</div>
+      <form id="compose">
+        <input id="text" placeholder="Say something" maxlength="2000" autocomplete="off" disabled>
+        <button id="send" disabled>Send</button>
+      </form>
+    </section>
+    <section>
+      <h2>In this room</h2>
+      <ul id="members"></ul>
+    </section>
+  </div>
+</main>
+<script>
+  // Minimal client for the v1 protocol. User-supplied text is only ever set via textContent.
+  const $ = (id) => document.getElementById(id);
+  let socket, room, me;
+  const typing = new Map();
+  let typingSent = false, typingTimer;
+
+  const send = (frame) => socket?.readyState === WebSocket.OPEN && socket.send(JSON.stringify({ v: 1, ...frame }));
+  const status = (text) => { $('status').textContent = text; };
+
+  function line(text, meta) {
+    const li = document.createElement('li');
+    if (meta) { const span = document.createElement('div'); span.className = 'meta'; span.textContent = meta; li.append(span); }
+    li.append(document.createTextNode(text));
+    $('log').append(li);
+    $('log').scrollTop = $('log').scrollHeight;
+  }
+
+  function renderMembers(members) {
+    $('members').replaceChildren(...members.map((m) => {
+      const li = document.createElement('li');
+      li.textContent = m.userId === me?.userId ? `${m.name} (you)` : m.name;
+      li.dataset.user = m.userId;
+      return li;
+    }));
+  }
+
+  function renderTyping() {
+    const names = [...typing.values()].map((t) => t.name);
+    $('typing').textContent = names.length ? `${names.join(', ')} typing…` : ' ';
+  }
+
+  const members = new Map();
+  function onFrame(frame) {
+    switch (frame.type) {
+      case 'welcome': me = frame.user; send({ type: 'join', room }); break;
+      case 'joined':
+        $('log').replaceChildren();
+        frame.history.forEach((m) => line(m.text, `${m.user.name} · ${new Date(m.sentAt).toLocaleTimeString()}`));
+        members.clear(); frame.members.forEach((m) => members.set(m.userId, m)); renderMembers([...members.values()]);
+        $('text').disabled = $('send').disabled = false; status(`connected to #${room}`); break;
+      case 'message':
+        line(frame.text, `${frame.user.name} · ${new Date(frame.sentAt).toLocaleTimeString()}`);
+        typing.delete(frame.user.userId); renderTyping(); break;
+      case 'presence':
+        if (frame.event === 'join') members.set(frame.member.userId, frame.member); else members.delete(frame.member.userId);
+        renderMembers([...members.values()]); line(`${frame.member.name} ${frame.event === 'join' ? 'joined' : 'left'}`); break;
+      case 'typing': {
+        clearTimeout(typing.get(frame.user.userId)?.timer);
+        if (frame.isTyping) typing.set(frame.user.userId, { name: frame.user.name, timer: setTimeout(() => { typing.delete(frame.user.userId); renderTyping(); }, 5000) });
+        else typing.delete(frame.user.userId);
+        renderTyping(); break;
+      }
+      case 'error': line(`${frame.code}: ${frame.message}`, 'server'); break;
+    }
+  }
+
+  $('connect').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    socket?.close();
+    room = $('room').value.trim();
+    status('getting a token…');
+    const response = await fetch(`/dev/token?name=${encodeURIComponent($('name').value.trim() || 'guest')}`);
+    if (!response.ok) { status('no token: start the server with DEV_TOKENS=true (npm run dev)'); return; }
+    const { token } = await response.json();
+    const url = new URL('/ws', location.href);
+    url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    url.searchParams.set('access_token', token);
+    socket = new WebSocket(url, 'chat.v1');
+    socket.onmessage = (message) => onFrame(JSON.parse(message.data));
+    socket.onclose = (event) => { status(`disconnected (${event.code}${event.reason ? `: ${event.reason}` : ''})`); $('text').disabled = $('send').disabled = true; };
+  });
+
+  $('compose').addEventListener('submit', (event) => {
+    event.preventDefault();
+    const text = $('text').value.trim();
+    if (!text) return;
+    send({ type: 'message', room, text, clientMsgId: crypto.randomUUID() });
+    $('text').value = '';
+    if (typingSent) { send({ type: 'typing', room, isTyping: false }); typingSent = false; }
+  });
+
+  $('text').addEventListener('input', () => {
+    if (!typingSent) { send({ type: 'typing', room, isTyping: true }); typingSent = true; }
+    clearTimeout(typingTimer);
+    typingTimer = setTimeout(() => { send({ type: 'typing', room, isTyping: false }); typingSent = false; }, 2000);
+  });
+</script>
+</body>
+</html>
