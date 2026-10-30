@@ -187,10 +187,9 @@ concurrent joins) runs against the in-memory broker, against the Redis adapter o
 when one is reachable at `REDIS_URL` (default `redis://127.0.0.1:6379`). A separate test covers
 presence cleanup after a node stops heart-beating.
 
-Locally: 72 tests pass and 5 real-Redis cases are skipped, in about 2 seconds (Node 22.23.4 and
-25.6.1, macOS, Apple M4 Pro). The real-Redis cases have **not** been run by the author, because no
-Redis server was available on the development machine; the Redis adapter has been exercised only
-through `ioredis-mock`, whose fidelity (for example `MULTI` isolation) is not guaranteed.
+CI starts a `redis:7-alpine` service container, so every CI run executes all 77 tests, including the
+real-Redis cases. Locally, without a Redis server, 72 pass and those 5 are skipped, in about 2
+seconds (Node 22.23.4 and 25.6.1, macOS, Apple M4 Pro).
 
 ## Limitations and roadmap
 
